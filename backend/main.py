@@ -1,4 +1,4 @@
-import os, uuid, subprocess, re, threading
+import os, uuid, subprocess, re, threading, zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -28,9 +28,10 @@ def transcribe(path):
     segs, _ = model.transcribe(str(path), vad_filter=True)
     return [{"start":float(s.start),"end":float(s.end),"text":s.text.strip()} for s in segs]
 
-def highlights(path, d):
+def highlights(path, d, requested=5):
+    requested=max(1,min(5,int(requested)))
     try:
-        segs=transcribe(path); windows=[]; width=min(45,d); step=max(10,int(width*.65))
+        segs=transcribe(path); windows=[]; width=min(45,max(8,d/requested)); step=max(5,int(width*.55))
         for start in range(0,max(1,int(d-width+1)),step):
             end=min(start+width,d); contained=[s for s in segs if s["end"]>start and s["start"]<end]; txt=" ".join(s["text"] for s in contained)
             if txt:
@@ -39,12 +40,12 @@ def highlights(path, d):
         chosen=[]
         for w in sorted(windows,key=lambda x:x[0],reverse=True):
             if all(abs(w[1]-v[1])>=max(15,width*.65) for v in chosen): chosen.append(w)
-            if len(chosen)>=5: break
+            if len(chosen)>=requested: break
         if chosen: return sorted([{"start":a,"end":b,"transcript":t} for _,a,b,t in chosen],key=lambda x:x["start"]),segs
-        return [{"start":0,"end":min(45,d),"transcript":""}],segs
+        length=min(max(8,d/requested),d); return [{"start":0,"end":length,"transcript":""}],segs
     except Exception as e:
         print("Whisper/highlight fallback:",str(e)[:300])
-    length=min(45,d); n=min(5,max(1,int(d//length)))
+    length=min(45,max(8,d/requested),d); n=min(requested,max(1,int(d//length)))
     return [{"start":min(i*length,max(0,d-length)),"end":min(i*length,max(0,d-length))+length,"transcript":""} for i in range(n)],[]
 
 def write_srt(job, segments, start, end):
@@ -75,11 +76,11 @@ def process(src, ratio, captions, clip_count):
     if ratio not in ("9:16","16:9"): raise HTTPException(400,"Choose 9:16 or 16:9.")
     clip_count=max(1,min(5,int(clip_count)))
     job=uuid.uuid4().hex[:12]; folder=STORAGE/job; folder.mkdir(parents=True,exist_ok=True)
-    d=duration(src); windows,transcript=highlights(src,d); windows=windows[:clip_count]; clips=[]
+    d=duration(src); windows,transcript=highlights(src,d,clip_count); windows=windows[:clip_count]; clips=[]
     for i,w in enumerate(windows,1):
         out=render(src,job,i,w["start"],w["end"],ratio,transcript,captions)
-        clips.append({"id":i,"start":w["start"],"end":w["end"],"transcript":w.get("transcript",""),"download":f"/api/jobs/{job}/files/{out.name}"})
-    return {"job_id":job,"duration":d,"ratio":ratio,"captions_burned":bool(captions and transcript),"clips":clips,"transcript_segments":transcript,"note":"AI-assisted highlight selection is heuristic; review before publishing."}
+        clips.append({"id":i,"start":w["start"],"end":w["end"],"transcript":w.get("transcript",""),"download":f"/api/jobs/{job}/files/{out.name}","preview":f"/api/jobs/{job}/files/{out.name}"})
+    return {"job_id":job,"duration":d,"ratio":ratio,"captions_burned":bool(captions and transcript),"clips":clips,"transcript_segments":transcript,"zip_download":f"/api/jobs/{job}/download-all","note":"Highlight selection is heuristic (not guaranteed viral); review before publishing."}
 
 @app.get("/health")
 def health(): return {"ok":True,"service":"lets-clipping","version":"1.1"}
@@ -118,3 +119,14 @@ def download(job:str,name:str):
     p=STORAGE/job/name
     if not p.is_file(): raise HTTPException(404,"Clip not found.")
     return FileResponse(p,filename=name,media_type="video/mp4")
+
+@app.get("/api/jobs/{job}/download-all")
+def download_all(job:str):
+    if not re.fullmatch(r"[a-f0-9]{12}",job): raise HTTPException(400,"Invalid job ID.")
+    folder=STORAGE/job
+    files=sorted(folder.glob("clip_*.mp4")) if folder.is_dir() else []
+    if not files: raise HTTPException(404,"Clips not found or storage expired.")
+    archive=folder/"clips_bundle.zip"
+    with zipfile.ZipFile(archive,"w",zipfile.ZIP_DEFLATED) as z:
+        for p in files: z.write(p,p.name)
+    return FileResponse(archive,filename=f"lets-clipping-{job}.zip",media_type="application/zip")
