@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: lets-clipping-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /health
+    envVars:
+      - key: WHISPER_MODEL
+        value: tiny
+      - key: MAX_UPLOAD_MB
+        value: "500"
+      - key: CORS_ORIGINS
+        value: "*"
+      - key: STORAGE_DIR
+        value: /app/storage
