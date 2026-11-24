@@ -76,7 +76,15 @@ def process(src, ratio, captions, clip_count):
     if ratio not in ("9:16","16:9"): raise HTTPException(400,"Choose 9:16 or 16:9.")
     clip_count=max(1,min(5,int(clip_count)))
     job=uuid.uuid4().hex[:12]; folder=STORAGE/job; folder.mkdir(parents=True,exist_ok=True)
-    d=duration(src); windows,transcript=highlights(src,d,clip_count); windows=windows[:clip_count]; clips=[]
+    d=duration(src); windows,transcript=highlights(src,d,clip_count); windows=windows[:clip_count];
+    if len(windows)<clip_count and d>0:
+        width=min(45,max(5,d/clip_count))
+        for i in range(clip_count):
+            start=min(i*width,max(0,d-width)); end=min(d,start+width)
+            if all(abs(start-w['start'])>1 for w in windows): windows.append({'start':start,'end':end,'transcript':''})
+            if len(windows)>=clip_count: break
+        windows=sorted(windows,key=lambda w:w['start'])[:clip_count]
+    clips=[]
     for i,w in enumerate(windows,1):
         out=render(src,job,i,w["start"],w["end"],ratio,transcript,captions)
         clips.append({"id":i,"start":w["start"],"end":w["end"],"transcript":w.get("transcript",""),"download":f"/api/jobs/{job}/files/{out.name}","preview":f"/api/jobs/{job}/files/{out.name}"})
